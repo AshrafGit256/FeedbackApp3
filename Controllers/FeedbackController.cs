@@ -376,5 +376,50 @@ namespace FeedbackAPI.Controllers
                 return StatusCode(500, "An error occurred while fetching audit logs.");
             }
         }
+
+        // POST api/feedback/log-action
+        // Receives frontend user interaction events
+        [HttpPost("log-action")]
+        public async Task<IActionResult> LogAction([FromBody] UserActionLog log)
+        {
+            if (string.IsNullOrWhiteSpace(log.Action))
+                return BadRequest("Action is required.");
+
+            // Sanitize inputs
+            log.Action  = log.Action.Length  > 100  ? log.Action[..100]   : log.Action;
+            log.Details = log.Details?.Length > 500 ? log.Details[..500]  : log.Details;
+
+            _logger.LogInformation(
+                "[USER ACTION] {Action} | Details: {Details} | IP: {Ip} | Time: {Time}",
+                log.Action, log.Details ?? "none", GetClientIp(), DateTime.UtcNow);
+
+            try
+            {
+                _db.AuditLogs.Add(new AuditLog
+                {
+                    Action       = log.Action,
+                    Entity       = "UserInteraction",
+                    EntityId     = log.EntityId,
+                    Details      = log.Details,
+                    IpAddress    = GetClientIp(),
+                    Success      = true,
+                    Created_at   = DateTime.UtcNow
+                });
+                await _db.SaveChangesAsync();
+                return Ok();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to save user action log");
+                return StatusCode(500, "Failed to save log.");
+            }
+        }
+    }
+
+    public class UserActionLog
+    {
+        public string Action   { get; set; } = string.Empty;
+        public string? Details { get; set; }
+        public int? EntityId   { get; set; }
     }
 }
