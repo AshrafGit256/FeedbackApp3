@@ -13,7 +13,6 @@ namespace FeedbackAPI.Controllers
         private readonly AppDbContext _db;
         private readonly ILogger<FeedbackController> _logger;
 
-        // Allowed categories whitelist — prevents injection via category field
         private static readonly string[] AllowedCategories =
             { "General", "Venue", "Registration", "Staff", "Food", "Technical", "Other" };
 
@@ -46,7 +45,7 @@ namespace FeedbackAPI.Controllers
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Failed to write audit log for action {Action}", action);
+                _logger.LogError(ex, "AUDIT | ACTION={Action} | STATUS=LOG_WRITE_FAILED | MESSAGE={Msg}", action, ex.Message);
             }
         }
 
@@ -54,10 +53,9 @@ namespace FeedbackAPI.Controllers
         [HttpGet("events")]
         public async Task<IActionResult> GetEvents()
         {
+            _logger.LogInformation("AUDIT | ACTION=GET_EVENTS | STATUS=REQUEST | IP={Ip}", GetClientIp());
             try
             {
-                _logger.LogInformation("Fetching active events from IP {Ip}", GetClientIp());
-
                 var events = await _db.Events
                     .Where(e => e.Event_Status == "active")
                     .Select(e => new
@@ -70,12 +68,12 @@ namespace FeedbackAPI.Controllers
                     })
                     .ToListAsync();
 
-                _logger.LogInformation("Returned {Count} events", events.Count);
+                _logger.LogInformation("AUDIT | ACTION=GET_EVENTS | STATUS=SUCCESS | COUNT={Count} | IP={Ip}", events.Count, GetClientIp());
                 return Ok(events);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error fetching events");
+                _logger.LogWarning("AUDIT | ACTION=GET_EVENTS | STATUS=ERROR | MESSAGE={Msg} | IP={Ip}", ex.Message, GetClientIp());
                 await WriteAudit("GET_EVENTS", "Event", null, null, false, ex.Message);
                 return StatusCode(500, "An error occurred while fetching events.");
             }
@@ -85,10 +83,8 @@ namespace FeedbackAPI.Controllers
         [HttpPost("submit")]
         public async Task<IActionResult> Submit([FromBody] Feedback feedback)
         {
-            _logger.LogInformation("Feedback submission attempt for Event {EventId} from IP {Ip}",
-                feedback?.Event_id, GetClientIp());
+            _logger.LogInformation("AUDIT | ACTION=SUBMIT_FEEDBACK | STATUS=REQUEST | EVENT={EventId} | IP={Ip}", feedback?.Event_id, GetClientIp());
 
-            // Model validation (data annotations)
             if (!ModelState.IsValid)
             {
                 var errors = ModelState.Values
@@ -96,43 +92,33 @@ namespace FeedbackAPI.Controllers
                     .Select(e => e.ErrorMessage)
                     .ToList();
 
-                _logger.LogWarning("Validation failed for feedback submission: {Errors}",
-                    string.Join(", ", errors));
-
-                await WriteAudit("SUBMIT_FEEDBACK", "Feedback", null,
-                    $"Validation failed: {string.Join(", ", errors)}", false);
-
+                _logger.LogWarning("AUDIT | ACTION=SUBMIT_FEEDBACK | STATUS=VALIDATION_FAILED | ERRORS={Errors} | IP={Ip}", string.Join(", ", errors), GetClientIp());
+                await WriteAudit("SUBMIT_FEEDBACK", "Feedback", null, $"Validation failed: {string.Join(", ", errors)}", false);
                 return BadRequest(new { errors });
             }
 
-            // Whitelist category validation
             if (!AllowedCategories.Contains(feedback.Category))
             {
-                _logger.LogWarning("Invalid category '{Category}' from IP {Ip}",
-                    feedback.Category, GetClientIp());
-                await WriteAudit("SUBMIT_FEEDBACK", "Feedback", null,
-                    $"Invalid category: {feedback.Category}", false);
+                _logger.LogWarning("AUDIT | ACTION=SUBMIT_FEEDBACK | STATUS=INVALID_CATEGORY | VALUE={Category} | IP={Ip}", feedback.Category, GetClientIp());
+                await WriteAudit("SUBMIT_FEEDBACK", "Feedback", null, $"Invalid category: {feedback.Category}", false);
                 return BadRequest(new { errors = new[] { "Invalid category selected." } });
             }
 
-            // Sanitize message — strip HTML/script tags (buffer overflow + XSS prevention)
             feedback.Message = Regex.Replace(feedback.Message, "<.*?>", string.Empty).Trim();
 
             if (feedback.Message.Length > 1000)
             {
-                _logger.LogWarning("Message too long from IP {Ip}", GetClientIp());
+                _logger.LogWarning("AUDIT | ACTION=SUBMIT_FEEDBACK | STATUS=MESSAGE_TOO_LONG | LENGTH={Len} | IP={Ip}", feedback.Message.Length, GetClientIp());
                 return BadRequest(new { errors = new[] { "Message cannot exceed 1000 characters." } });
             }
 
             try
             {
-                // Validate event exists using parameterized query (EF handles this — no raw SQL)
                 var ev = await _db.Events.FindAsync(feedback.Event_id);
                 if (ev == null)
                 {
-                    _logger.LogWarning("Event {EventId} not found", feedback.Event_id);
-                    await WriteAudit("SUBMIT_FEEDBACK", "Feedback", null,
-                        $"Event {feedback.Event_id} not found", false);
+                    _logger.LogWarning("AUDIT | ACTION=SUBMIT_FEEDBACK | STATUS=EVENT_NOT_FOUND | EVENT={EventId} | IP={Ip}", feedback.Event_id, GetClientIp());
+                    await WriteAudit("SUBMIT_FEEDBACK", "Feedback", null, $"Event {feedback.Event_id} not found", false);
                     return NotFound(new { errors = new[] { "Event not found." } });
                 }
 
@@ -142,18 +128,17 @@ namespace FeedbackAPI.Controllers
                 _db.Feedbacks.Add(feedback);
                 await _db.SaveChangesAsync();
 
-                _logger.LogInformation("Feedback {FeedbackId} submitted for Event {EventId}",
-                    feedback.Id, feedback.Event_id);
+                _logger.LogInformation("AUDIT | ACTION=SUBMIT_FEEDBACK | STATUS=SUCCESS | FEEDBACK_ID={FeedbackId} | EVENT={EventId} | RATING={Rating} | CATEGORY={Category} | ANONYMOUS={Anon} | IP={Ip}",
+                    feedback.Id, feedback.Event_id, feedback.Rating, feedback.Category, feedback.Is_Anonymous, GetClientIp());
 
                 await WriteAudit("SUBMIT_FEEDBACK", "Feedback", feedback.Id,
-                    $"Event {feedback.Event_id}, Rating {feedback.Rating}, Category {feedback.Category}",
-                    true);
+                    $"Event {feedback.Event_id}, Rating {feedback.Rating}, Category {feedback.Category}", true);
 
                 return Ok(new { feedback.Id, message = "Feedback submitted successfully." });
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error submitting feedback for Event {EventId}", feedback.Event_id);
+                _logger.LogWarning("AUDIT | ACTION=SUBMIT_FEEDBACK | STATUS=ERROR | MESSAGE={Msg} | IP={Ip}", ex.Message, GetClientIp());
                 await WriteAudit("SUBMIT_FEEDBACK", "Feedback", null, null, false, ex.Message);
                 return StatusCode(500, "An error occurred while submitting feedback.");
             }
@@ -163,12 +148,11 @@ namespace FeedbackAPI.Controllers
         [HttpGet("status/{id}")]
         public async Task<IActionResult> GetStatus(int id)
         {
-            _logger.LogInformation("Status check for Feedback {FeedbackId} from IP {Ip}",
-                id, GetClientIp());
+            _logger.LogInformation("AUDIT | ACTION=GET_STATUS | STATUS=REQUEST | FEEDBACK_ID={Id} | IP={Ip}", id, GetClientIp());
 
             if (id <= 0)
             {
-                _logger.LogWarning("Invalid feedback ID {Id}", id);
+                _logger.LogWarning("AUDIT | ACTION=GET_STATUS | STATUS=INVALID_ID | VALUE={Id} | IP={Ip}", id, GetClientIp());
                 return BadRequest(new { errors = new[] { "Invalid feedback ID." } });
             }
 
@@ -177,12 +161,12 @@ namespace FeedbackAPI.Controllers
                 var feedback = await _db.Feedbacks.FindAsync(id);
                 if (feedback == null)
                 {
-                    _logger.LogWarning("Feedback {FeedbackId} not found", id);
+                    _logger.LogWarning("AUDIT | ACTION=GET_STATUS | STATUS=NOT_FOUND | FEEDBACK_ID={Id} | IP={Ip}", id, GetClientIp());
                     return NotFound(new { errors = new[] { "Feedback not found." } });
                 }
 
+                _logger.LogInformation("AUDIT | ACTION=GET_STATUS | STATUS=SUCCESS | FEEDBACK_ID={Id} | RESULT={Status} | IP={Ip}", id, feedback.Status, GetClientIp());
                 await WriteAudit("GET_STATUS", "Feedback", id, null, true);
-
                 return Ok(new
                 {
                     feedback.Id,
@@ -194,7 +178,7 @@ namespace FeedbackAPI.Controllers
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error fetching status for Feedback {FeedbackId}", id);
+                _logger.LogWarning("AUDIT | ACTION=GET_STATUS | STATUS=ERROR | MESSAGE={Msg} | IP={Ip}", ex.Message, GetClientIp());
                 await WriteAudit("GET_STATUS", "Feedback", id, null, false, ex.Message);
                 return StatusCode(500, "An error occurred while fetching feedback status.");
             }
@@ -204,8 +188,7 @@ namespace FeedbackAPI.Controllers
         [HttpGet("event/{eventId}")]
         public async Task<IActionResult> GetByEvent(int eventId)
         {
-            _logger.LogInformation("Fetching feedback for Event {EventId} from IP {Ip}",
-                eventId, GetClientIp());
+            _logger.LogInformation("AUDIT | ACTION=GET_EVENT_FEEDBACK | STATUS=REQUEST | EVENT={EventId} | IP={Ip}", eventId, GetClientIp());
 
             if (eventId <= 0)
                 return BadRequest(new { errors = new[] { "Invalid event ID." } });
@@ -227,17 +210,13 @@ namespace FeedbackAPI.Controllers
                     .OrderByDescending(f => f.Created_at)
                     .ToListAsync();
 
-                _logger.LogInformation("Returned {Count} feedback records for Event {EventId}",
-                    feedbacks.Count, eventId);
-
-                await WriteAudit("GET_EVENT_FEEDBACK", "Feedback", eventId,
-                    $"Returned {feedbacks.Count} records", true);
-
+                _logger.LogInformation("AUDIT | ACTION=GET_EVENT_FEEDBACK | STATUS=SUCCESS | EVENT={EventId} | COUNT={Count} | IP={Ip}", eventId, feedbacks.Count, GetClientIp());
+                await WriteAudit("GET_EVENT_FEEDBACK", "Feedback", eventId, $"Returned {feedbacks.Count} records", true);
                 return Ok(feedbacks);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error fetching feedback for Event {EventId}", eventId);
+                _logger.LogWarning("AUDIT | ACTION=GET_EVENT_FEEDBACK | STATUS=ERROR | MESSAGE={Msg} | IP={Ip}", ex.Message, GetClientIp());
                 await WriteAudit("GET_EVENT_FEEDBACK", "Feedback", eventId, null, false, ex.Message);
                 return StatusCode(500, "An error occurred while fetching feedback.");
             }
@@ -247,8 +226,7 @@ namespace FeedbackAPI.Controllers
         [HttpPatch("{id}/status")]
         public async Task<IActionResult> UpdateStatus(int id, [FromBody] string status)
         {
-            _logger.LogInformation("Status update for Feedback {FeedbackId} to '{Status}' from IP {Ip}",
-                id, status, GetClientIp());
+            _logger.LogInformation("AUDIT | ACTION=UPDATE_STATUS | STATUS=REQUEST | FEEDBACK_ID={Id} | NEW_STATUS={Status} | IP={Ip}", id, status, GetClientIp());
 
             if (id <= 0)
                 return BadRequest(new { errors = new[] { "Invalid feedback ID." } });
@@ -256,7 +234,7 @@ namespace FeedbackAPI.Controllers
             var allowed = new[] { "Pending", "Reviewed" };
             if (string.IsNullOrWhiteSpace(status) || !allowed.Contains(status))
             {
-                _logger.LogWarning("Invalid status '{Status}' for Feedback {FeedbackId}", status, id);
+                _logger.LogWarning("AUDIT | ACTION=UPDATE_STATUS | STATUS=INVALID_VALUE | VALUE={Status} | IP={Ip}", status, GetClientIp());
                 return BadRequest(new { errors = new[] { "Status must be Pending or Reviewed." } });
             }
 
@@ -265,7 +243,7 @@ namespace FeedbackAPI.Controllers
                 var feedback = await _db.Feedbacks.FindAsync(id);
                 if (feedback == null)
                 {
-                    _logger.LogWarning("Feedback {FeedbackId} not found for status update", id);
+                    _logger.LogWarning("AUDIT | ACTION=UPDATE_STATUS | STATUS=NOT_FOUND | FEEDBACK_ID={Id} | IP={Ip}", id, GetClientIp());
                     return NotFound(new { errors = new[] { "Feedback not found." } });
                 }
 
@@ -273,17 +251,13 @@ namespace FeedbackAPI.Controllers
                 feedback.Status = status;
                 await _db.SaveChangesAsync();
 
-                _logger.LogInformation("Feedback {FeedbackId} status changed from {Old} to {New}",
-                    id, oldStatus, status);
-
-                await WriteAudit("UPDATE_STATUS", "Feedback", id,
-                    $"Status changed from {oldStatus} to {status}", true);
-
+                _logger.LogInformation("AUDIT | ACTION=UPDATE_STATUS | STATUS=SUCCESS | FEEDBACK_ID={Id} | FROM={Old} | TO={New} | IP={Ip}", id, oldStatus, status, GetClientIp());
+                await WriteAudit("UPDATE_STATUS", "Feedback", id, $"Status changed from {oldStatus} to {status}", true);
                 return Ok(new { message = "Status updated." });
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error updating status for Feedback {FeedbackId}", id);
+                _logger.LogWarning("AUDIT | ACTION=UPDATE_STATUS | STATUS=ERROR | MESSAGE={Msg} | IP={Ip}", ex.Message, GetClientIp());
                 await WriteAudit("UPDATE_STATUS", "Feedback", id, null, false, ex.Message);
                 return StatusCode(500, "An error occurred while updating status.");
             }
@@ -293,8 +267,7 @@ namespace FeedbackAPI.Controllers
         [HttpGet("analytics/{eventId}")]
         public async Task<IActionResult> Analytics(int eventId)
         {
-            _logger.LogInformation("Analytics request for Event {EventId} from IP {Ip}",
-                eventId, GetClientIp());
+            _logger.LogInformation("AUDIT | ACTION=GET_ANALYTICS | STATUS=REQUEST | EVENT={EventId} | IP={Ip}", eventId, GetClientIp());
 
             if (eventId <= 0)
                 return BadRequest(new { errors = new[] { "Invalid event ID." } });
@@ -326,17 +299,13 @@ namespace FeedbackAPI.Controllers
                         .ToList()
                 };
 
-                _logger.LogInformation("Analytics returned for Event {EventId}: {Total} records",
-                    eventId, result.total);
-
-                await WriteAudit("GET_ANALYTICS", "Feedback", eventId,
-                    $"Total: {result.total}, Avg: {result.averageRating}", true);
-
+                _logger.LogInformation("AUDIT | ACTION=GET_ANALYTICS | STATUS=SUCCESS | EVENT={EventId} | TOTAL={Total} | AVG_RATING={Avg} | IP={Ip}", eventId, result.total, result.averageRating, GetClientIp());
+                await WriteAudit("GET_ANALYTICS", "Feedback", eventId, $"Total: {result.total}, Avg: {result.averageRating}", true);
                 return Ok(result);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error fetching analytics for Event {EventId}", eventId);
+                _logger.LogWarning("AUDIT | ACTION=GET_ANALYTICS | STATUS=ERROR | MESSAGE={Msg} | IP={Ip}", ex.Message, GetClientIp());
                 await WriteAudit("GET_ANALYTICS", "Feedback", eventId, null, false, ex.Message);
                 return StatusCode(500, "An error occurred while fetching analytics.");
             }
@@ -345,11 +314,11 @@ namespace FeedbackAPI.Controllers
         // GET api/feedback/audit-logs
         [HttpGet("audit-logs")]
         public async Task<IActionResult> GetAuditLogs(
-            [FromQuery] string? action  = null,
-            [FromQuery] int page        = 1,
-            [FromQuery] int pageSize    = 20)
+            [FromQuery] string? action = null,
+            [FromQuery] int page       = 1,
+            [FromQuery] int pageSize   = 20)
         {
-            _logger.LogInformation("Audit log request from IP {Ip}", GetClientIp());
+            _logger.LogInformation("AUDIT | ACTION=GET_AUDIT_LOGS | STATUS=REQUEST | IP={Ip}", GetClientIp());
 
             if (page < 1) page = 1;
             if (pageSize < 1 || pageSize > 100) pageSize = 20;
@@ -368,49 +337,47 @@ namespace FeedbackAPI.Controllers
                     .Take(pageSize)
                     .ToListAsync();
 
+                _logger.LogInformation("AUDIT | ACTION=GET_AUDIT_LOGS | STATUS=SUCCESS | TOTAL={Total} | IP={Ip}", total, GetClientIp());
                 return Ok(new { total, page, pageSize, logs });
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error fetching audit logs");
+                _logger.LogWarning("AUDIT | ACTION=GET_AUDIT_LOGS | STATUS=ERROR | MESSAGE={Msg} | IP={Ip}", ex.Message, GetClientIp());
                 return StatusCode(500, "An error occurred while fetching audit logs.");
             }
         }
 
         // POST api/feedback/log-action
-        // Receives frontend user interaction events
         [HttpPost("log-action")]
         public async Task<IActionResult> LogAction([FromBody] UserActionLog log)
         {
             if (string.IsNullOrWhiteSpace(log.Action))
                 return BadRequest("Action is required.");
 
-            // Sanitize inputs
-            log.Action  = log.Action.Length  > 100  ? log.Action[..100]   : log.Action;
-            log.Details = log.Details?.Length > 500 ? log.Details[..500]  : log.Details;
+            log.Action  = log.Action.Length  > 100 ? log.Action[..100]  : log.Action;
+            log.Details = log.Details?.Length > 500 ? log.Details[..500] : log.Details;
 
-            _logger.LogInformation(
-                "[USER ACTION] {Action} | Details: {Details} | IP: {Ip} | Time: {Time}",
-                log.Action, log.Details ?? "none", GetClientIp(), DateTime.UtcNow);
+            _logger.LogInformation("AUDIT | ACTION={Action} | STATUS=USER_INTERACTION | DETAILS={Details} | IP={Ip}",
+                log.Action, log.Details ?? "none", GetClientIp());
 
             try
             {
                 _db.AuditLogs.Add(new AuditLog
                 {
-                    Action       = log.Action,
-                    Entity       = "UserInteraction",
-                    EntityId     = log.EntityId,
-                    Details      = log.Details,
-                    IpAddress    = GetClientIp(),
-                    Success      = true,
-                    Created_at   = DateTime.UtcNow
+                    Action     = log.Action,
+                    Entity     = "UserInteraction",
+                    EntityId   = log.EntityId,
+                    Details    = log.Details,
+                    IpAddress  = GetClientIp(),
+                    Success    = true,
+                    Created_at = DateTime.UtcNow
                 });
                 await _db.SaveChangesAsync();
                 return Ok();
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Failed to save user action log");
+                _logger.LogError(ex, "AUDIT | ACTION=LOG_ACTION | STATUS=WRITE_FAILED | MESSAGE={Msg}", ex.Message);
                 return StatusCode(500, "Failed to save log.");
             }
         }

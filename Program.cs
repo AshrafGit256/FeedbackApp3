@@ -13,21 +13,32 @@ builder.Services.AddCors(options =>
         policy.AllowAnyOrigin().AllowAnyHeader().AllowAnyMethod());
 });
 
-// Swagger
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(c =>
 {
     c.SwaggerDoc("v1", new Microsoft.OpenApi.Models.OpenApiInfo
     {
-        Title    = "EGMS Feedback API",
-        Version  = "v1",
+        Title       = "EGMS Feedback API",
+        Version     = "v1",
         Description = "Standalone feedback API for the EGMS Event Management System"
     });
 });
 
+// Standardized log format
+builder.Logging.ClearProviders();
+builder.Logging.AddConsole(options =>
+{
+    options.FormatterName = "simple";
+});
+builder.Logging.AddSimpleConsole(options =>
+{
+    options.SingleLine    = true;
+    options.TimestampFormat = "yyyy-MM-dd HH:mm:ss | ";
+    options.IncludeScopes = false;
+});
+
 var app = builder.Build();
 
-// Swagger UI at root
 app.UseSwagger();
 app.UseSwaggerUI(c =>
 {
